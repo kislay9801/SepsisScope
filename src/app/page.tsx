@@ -105,15 +105,18 @@ export default function HomePage() {
         try {
           return JSON.parse(text);
         } catch {
-          // Server returned HTML/plain-text (e.g. Vercel 500 page or Python traceback)
+          // Server returned HTML/plain-text (e.g. a 500 error page or traceback)
           const snippet = text.replace(/<[^>]+>/g, " ").trim().slice(0, 300);
           return {
             status: "error",
-            error: `Server error (HTTP ${r.status}): ${snippet || "empty response"}`,
+            error: `Server error (HTTP ${r.status}) from ${apiUrl}: ${snippet || "empty response"}`,
           };
         }
       })
-      .catch((err) => ({ status: "error", error: String(err) }));
+      .catch((err) => ({
+        status: "error",
+        error: `${String(err)} — API URL: ${apiUrl}. If this is a CORS or network error, make sure NEXT_PUBLIC_API_URL is set to your backend service URL in Render's environment settings and the frontend has been redeployed.`,
+      }));
 
     // Animated progress while waiting
     const progressSteps: Array<[PipelineStep["key"], number]> = [

@@ -54,7 +54,25 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
+
+# Allow cross-origin requests from any origin (frontend on a different Render
+# subdomain).  Be explicit so newer flask-cors versions don't silently skip
+# preflight responses.
+CORS(
+    app,
+    resources={r"/*": {"origins": "*"}},
+    allow_headers=["Content-Type"],
+    methods=["GET", "POST", "OPTIONS"],
+    supports_credentials=False,
+)
+
+@app.after_request
+def _cors_headers(response):
+    """Belt-and-suspenders CORS headers on every response including 4xx/5xx."""
+    response.headers["Access-Control-Allow-Origin"]  = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    return response
 
 SUPPORTED = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".ppm", ".bmp"}
 
@@ -456,8 +474,12 @@ def _draw_zone_overlay_full(img_rgb, disc: dict, kept_segments: list[dict],
 # FLASK ROUTES
 # ──────────────────────────────────────────────────────────────────────
 
-@app.route("/api/analyze", methods=["POST"])
+@app.route("/api/analyze", methods=["POST", "OPTIONS"])
 def analyze():
+    # Browser sends OPTIONS preflight before the actual POST
+    if request.method == "OPTIONS":
+        return "", 204
+
     if "image" not in request.files:
         return jsonify({"error": "No image file provided. Use field name 'image'."}), 400
 
