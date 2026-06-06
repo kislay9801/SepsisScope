@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "functions": {
+    "api/analyze.py": {
+      "runtime": "python3.12.x",
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/api/analyze",
+      "destination": "/api/analyze.py"
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "name": "sepsis-scope",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k -n \"FLASK,NEXT\" -c \"yellow,cyan\" \"python3 api/analyze.py\" \"next dev\"",
+    "dev:next": "next dev",
+    "dev:api": "python3 api/analyze.py",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.400.0",
+    "next": "^16.2.7",
+    "react": "^18",
+    "react-dom": "^18",
+    "tailwind-merge": "^2.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "autoprefixer": "^10",
+    "concurrently": "^10.0.3",
+    "eslint": "^8",
+    "eslint-config-next": "^16.2.7",
+    "postcss": "^8",
+    "tailwindcss": "^3.4.4",
+    "typescript": "^5"
+  }
+}

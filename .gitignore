@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+venv/
+env/
+.venv/
+.env/
+data/
+# Environment variables
+.env
+.env.local
+
+# Output / generated files
+out/
+out.zip
+*.zip
+
+# Data (large image datasets — commit only if small/versioned)
+data/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Model weights / large binaries
+*.h5
+*.pkl
+*.pth
+*.pt
+*.onnx
+*.npy
+*.npz
+
+# Next.js
+.next/
+node_modules/
+.vercel/
+*.tsbuildinfo
+next-env.d.ts
