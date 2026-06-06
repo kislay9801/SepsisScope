@@ -18,6 +18,34 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+# ── scikit-image shim ─────────────────────────────────────────────────────────
+# Vercel's Python runtime crashes when scikit-image is installed because it
+# tries to load .pyi stub files that are absent in the vendored bundle:
+#   "Cannot load imports from non-existent stub /var/task/_vendor/skimage/__init__.pyi"
+#
+# Fix: register our scipy/numpy/opencv shim as 'skimage' in sys.modules *before*
+# any pipeline step module is imported, so their `from skimage import ...` calls
+# resolve to the shim instead of the broken package.
+from api.skimage_shim import filters as _sk_filters, exposure as _sk_exposure
+from api.skimage_shim import morphology as _sk_morphology, measure as _sk_measure
+import types as _types
+
+def _make_skimage_pkg():
+    pkg = _types.ModuleType("skimage")
+    pkg.filters   = _sk_filters
+    pkg.exposure  = _sk_exposure
+    pkg.morphology = _sk_morphology
+    pkg.measure   = _sk_measure
+    return pkg
+
+_skimage_pkg = _make_skimage_pkg()
+sys.modules.setdefault("skimage",            _skimage_pkg)
+sys.modules.setdefault("skimage.filters",    _sk_filters)
+sys.modules.setdefault("skimage.exposure",   _sk_exposure)
+sys.modules.setdefault("skimage.morphology", _sk_morphology)
+sys.modules.setdefault("skimage.measure",    _sk_measure)
+# ─────────────────────────────────────────────────────────────────────────────
+
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
