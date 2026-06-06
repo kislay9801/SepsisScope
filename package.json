@@ -7,7 +7,7 @@
     "dev:next": "next dev",
     "dev:api": "python3 api/analyze.py",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p ${PORT:-3000}",
     "lint": "next lint"
   },
   "dependencies": {

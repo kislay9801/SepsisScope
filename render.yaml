@@ -1,0 +1,46 @@
+# render.yaml — Render Blueprint for SepsisScope
+# Deploys two services from this single repo:
+#   1. sepsisscope-api   — Python / Flask image analysis backend
+#   2. sepsisscope-web   — Next.js frontend
+#
+# Deploy steps:
+#   1. Push this repo to GitHub / GitLab.
+#   2. Go to https://dashboard.render.com → New → Blueprint and connect the repo.
+#   3. After both services finish their first deploy, copy the "sepsisscope-api"
+#      external URL (e.g. https://sepsisscope-api.onrender.com).
+#   4. In the "sepsisscope-web" service → Environment, set:
+#        NEXT_PUBLIC_API_URL = https://sepsisscope-api.onrender.com/api/analyze
+#   5. Trigger a manual redeploy of "sepsisscope-web" so the build picks up the
+#      new env var.
+
+services:
+
+  # ── Backend: Flask + image analysis pipeline ──────────────────────────────
+  - type: web
+    name: sepsisscope-api
+    runtime: python
+    # Use Python 3.11 for broad package compatibility
+    buildCommand: pip install -r requirements.txt
+    # PYTHONPATH=. ensures the project root is on sys.path so step*.py modules
+    # are importable.  1 worker because image processing is memory-intensive.
+    # timeout 300 s gives plenty of time for heavy fundus images.
+    startCommand: PYTHONPATH=. gunicorn --bind 0.0.0.0:$PORT --timeout 300 --workers 1 api.analyze:app
+    plan: free
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+
+  # ── Frontend: Next.js ──────────────────────────────────────────────────────
+  - type: web
+    name: sepsisscope-web
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    plan: free
+    envVars:
+      - key: NODE_VERSION
+        value: 20.11.0
+      # Set this to your sepsisscope-api URL after the backend is deployed.
+      # Example: https://sepsisscope-api.onrender.com/api/analyze
+      - key: NEXT_PUBLIC_API_URL
+        sync: false
