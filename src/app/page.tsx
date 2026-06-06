@@ -98,7 +98,8 @@ export default function HomePage() {
 
     let responseData: AnalysisResponse | null = null;
 
-    const apiPromise = fetch("/api/analyze", { method: "POST", body: formData })
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "/api/analyze";
+    const apiPromise = fetch(apiUrl, { method: "POST", body: formData })
       .then((r) => r.json())
       .catch((err) => ({ status: "error", error: String(err) }));
 
