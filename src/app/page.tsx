@@ -118,32 +118,32 @@ export default function HomePage() {
         error: `${String(err)} — API URL: ${apiUrl}. If this is a CORS or network error, make sure NEXT_PUBLIC_API_URL is set to your backend service URL in Render's environment settings and the frontend has been redeployed.`,
       }));
 
-    // Animated progress while waiting
-    const progressSteps: Array<[PipelineStep["key"], number]> = [
-      ["step1", 1800],
-      ["step2", 1400],
-      ["step3", 1000],
-      ["step4", 1200],
-      ["step5", 800],
-    ];
+    // Track when the real API call finishes so the progress animation can
+    // bail out immediately instead of running a fixed, padded duration.
+    let apiDone = false;
+    const apiTracked = apiPromise.then((d) => {
+      responseData = d as AnalysisResponse;
+      apiDone = true;
+    });
 
-    let idx = 0;
+    // Light-weight progress animation. Short per-step delays just so the user
+    // sees movement; the loop exits the moment the backend responds, so a fast
+    // analysis returns in well under a second rather than waiting ~6s.
+    const progressSteps: Array<PipelineStep["key"]> = [
+      "step1", "step2", "step3", "step4", "step5",
+    ];
+    const STEP_MS = 250;
+
     const advanceSteps = async () => {
-      for (const [key, ms] of progressSteps) {
-        if (idx > 0) setStepStatus(progressSteps[idx - 1][0], "running");
-        await delay(ms);
-        idx++;
-        if (idx < progressSteps.length) {
-          setStepStatus(key, "done");
-          setStepStatus(progressSteps[idx][0], "running");
-        }
+      for (let i = 0; i < progressSteps.length; i++) {
+        if (apiDone) break;                       // backend already finished
+        setStepStatus(progressSteps[i], "running");
+        await delay(STEP_MS);
+        if (i < progressSteps.length - 1) setStepStatus(progressSteps[i], "done");
       }
     };
 
-    await Promise.all([
-      apiPromise.then((d) => { responseData = d as AnalysisResponse; }),
-      advanceSteps(),
-    ]);
+    await Promise.all([apiTracked, advanceSteps()]);
 
     if (!responseData) {
       setAppState("error");
@@ -225,6 +225,7 @@ export default function HomePage() {
               <button
                 onClick={handleAnalyze}
                 disabled={!canAnalyze}
+                suppressHydrationWarning
                 className={`
                   mt-4 w-full flex items-center justify-center gap-2 py-3 px-6
                   rounded-xl text-sm font-semibold border transition-all duration-150

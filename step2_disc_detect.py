@@ -80,20 +80,91 @@ def detect_disc_convergence(skeleton, segments_csv, h, w):
 
     return int(cx), int(cy), confidence
 
+
+# ──────────────────────────────────────────────────────────────
+# HELPER — blur restricted to the retina (no surround bleed-in)
+# ──────────────────────────────────────────────────────────────
+def _masked_blur(img, fov_mask, ksize, sigma):
+    """Gaussian-blur ``img`` using only in-FOV pixels.
+
+    Equivalent to averaging each neighbourhood over the retina pixels alone:
+    blur(img·mask) / blur(mask).  This stops a bright surround from leaking
+    across the FOV boundary and biasing the peak toward the edge.
+    """
+    if fov_mask is None:
+        return cv2.GaussianBlur(img.astype(np.float32), ksize, sigma)
+    m = (fov_mask > 0).astype(np.float32)
+    num = cv2.GaussianBlur(img.astype(np.float32) * m, ksize, sigma)
+    den = cv2.GaussianBlur(m, ksize, sigma)
+    out = num / (den + 1e-6)
+    return out * m
+
+
+# ──────────────────────────────────────────────────────────────
+# METHOD 2 — COMBINED DENSITY + BRIGHTNESS (primary)
+# ──────────────────────────────────────────────────────────────
+def detect_disc_combined(skeleton, img_rgb, h, w, fov_mask=None):
+    """
+    The optic disc is simultaneously (a) the brightest compact region and
+    (b) the hub where vessels converge.  Using either cue alone is brittle —
+    bright lesions fool brightness, dense vessel arcades fool density — but
+    their *product* peaks reliably on the true disc.
+
+    A wrong disc centre/radius shifts the whole 1r–2r measurement annulus off
+    the vessels, which is a major cause of "insufficient arterioles", so this
+    fused estimate matters as much as the segmentation itself.
+
+    ``fov_mask`` restricts the search to the retina interior so the bright
+    camera-aperture rim (or anything outside the retina) can never win.
+    """
+    if skeleton is None or skeleton.sum() < 10:
+        return None, None, 0.0
+
+    # Vessel-density heatmap (regional concentration of skeleton pixels)
+    density = cv2.GaussianBlur(skeleton.astype(np.float32), (151, 151), 40)
+
+    # Brightness heatmap on the green channel.  Crucially, mask to the retina
+    # BEFORE blurring and normalise by the blurred mask — otherwise a bright
+    # surround (white / checkerboard) bleeds inward under the large kernel and
+    # drags the peak toward the FOV edge.
+    green = img_rgb[:, :, 1].astype(np.float32)
+    bright = _masked_blur(green, fov_mask, (101, 101), 30)
+
+    def _norm(m):
+        mn, mx = float(m.min()), float(m.max())
+        return (m - mn) / (mx - mn) if mx - mn > 1e-6 else np.zeros_like(m)
+
+    # Fuse: both cues must agree.  +1e-3 keeps a vessel hub from being zeroed
+    # out where brightness happens to dip slightly.
+    score = (_norm(density) + 1e-3) * (_norm(bright) + 1e-3)
+
+    if fov_mask is not None:
+        score = score * (fov_mask > 0)
+
+    _, max_val, _, max_loc = cv2.minMaxLoc(score)
+    cx, cy = max_loc
+
+    mean_val = float(score.mean())
+    confidence = min(1.0, max(0.0, float(max_val / (mean_val + 1e-6)) / 8.0))
+
+    return int(cx), int(cy), confidence
+
 # ──────────────────────────────────────────────────────────────
 # METHOD 3 — POSITIONAL PRIOR FALLBACK
 # ──────────────────────────────────────────────────────────────
-def detect_disc_brightness(img_rgb, h, w):
+def detect_disc_brightness(img_rgb, h, w, fov_mask=None):
     """
     Brightness-guided disc detection.
     The optic disc is the brightest, most compact circular region.
     Works when vessel density fails (disc near edge, sparse vessels).
-    """
-    # Use green channel — best contrast for disc vs background
-    green = img_rgb[:, :, 1].astype(np.float32)
 
-    # Blur to suppress noise and small bright lesions
-    bright_map = cv2.GaussianBlur(green, (61, 61), 20)
+    ``fov_mask`` keeps the bright FOV rim / surround out of the running so the
+    peak falls on the disc, not the aperture edge.
+    """
+    # Use green channel — best contrast for disc vs background.
+    # Masked blur so a bright surround doesn't leak in across the FOV edge.
+    green = img_rgb[:, :, 1].astype(np.float32)
+    bright_map = _masked_blur(green, fov_mask, (61, 61), 20)
 
     # Suppress the image centre — if vessel density already failed,
     # the disc is likely NOT in the centre
@@ -152,18 +223,22 @@ def estimate_disc_radius(img_rgb, cx, cy, h, w):
     default_r = int(DISC_RADIUS_FRACTION * min(h, w))
 
     try:
-        green = img_rgb[:, :, 1].astype(np.float32)
+        # Smooth first so single-pixel noise/specular highlights don't drive
+        # either the centre reading or the ring samples.
+        green = cv2.GaussianBlur(img_rgb[:, :, 1].astype(np.float32), (0, 0), 3)
 
-        # Sample brightness at increasing radii from centre
-        centre_brightness = green[cy, cx]
-        threshold = centre_brightness * 0.45  # disc edge is ~65% of centre brightness
+        # Centre brightness from a small patch median, not one pixel
+        y0, y1 = max(0, cy - 3), min(h, cy + 4)
+        x0, x1 = max(0, cx - 3), min(w, cx + 4)
+        centre_brightness = float(np.median(green[y0:y1, x0:x1]))
+        threshold = centre_brightness * 0.55  # disc edge ~ 55% of centre brightness
 
         radii_tested = range(5, int(0.25 * min(h, w)), 2)
         disc_r = default_r
 
         for r in radii_tested:
-            # Sample 16 points on a circle of this radius
-            angles = np.linspace(0, 2 * np.pi, 16, endpoint=False)
+            # Sample 24 points on a circle of this radius
+            angles = np.linspace(0, 2 * np.pi, 24, endpoint=False)
             ring_vals = []
             for angle in angles:
                 sr = int(cy + r * np.sin(angle))
@@ -174,7 +249,9 @@ def estimate_disc_radius(img_rgb, cx, cy, h, w):
             if not ring_vals:
                 continue
 
-            if np.mean(ring_vals) < threshold:
+            # Use the median ring brightness — robust to a few vessels or
+            # lesions crossing the ring.
+            if float(np.median(ring_vals)) < threshold:
                 disc_r = r
                 break
 
@@ -210,15 +287,31 @@ def process_image(args):
         skeleton = cv2.imread(str(skel_path), cv2.IMREAD_GRAYSCALE)
         skeleton = (skeleton > 127).astype(np.uint8)
 
-        # ── Method 1: Vessel convergence ──────────────────────
-        cx, cy, confidence = detect_disc_convergence(skeleton, None, h, w)
+        # ── Retinal FOV mask ──────────────────────────────────
+        # Confine every disc cue to the retina interior so the bright camera
+        # aperture rim (or a white/checkerboard surround) can't be mistaken
+        # for the disc.  Reuse Step 1's colour-based FOV detector.
+        try:
+            from step1_segment_skeleton import retinal_fov_mask
+            fov_mask, fov_cx, fov_cy, fov_r = retinal_fov_mask(img_bgr, shrink_frac=0.08)
+        except Exception:
+            fov_mask, fov_cx, fov_cy, fov_r = None, w // 2, h // 2, min(h, w) // 2
 
-        method = "convergence"
+        # ── Method 1: Combined density + brightness (primary) ──
+        cx, cy, confidence = detect_disc_combined(skeleton, img_rgb, h, w, fov_mask)
+
+        method = "density+brightness"
         flag   = ""
+
+        # If the fused detector is weak, fall back to pure vessel convergence
+        if cx is None or confidence < CONFIDENCE_THRESHOLD:
+            cx2, cy2, conf2 = detect_disc_convergence(skeleton, None, h, w)
+            if cx2 is not None and conf2 > confidence:
+                cx, cy, confidence, method = cx2, cy2, conf2, "convergence"
 
         if cx is None or confidence < CONFIDENCE_THRESHOLD:
         # ── Method 2b: Brightness-guided refinement ───────
-            cx, cy, confidence = detect_disc_brightness(img_rgb, h, w)
+            cx, cy, confidence = detect_disc_brightness(img_rgb, h, w, fov_mask)
             method = "brightness"
             flag   = ""
 
@@ -230,6 +323,32 @@ def process_image(args):
 
         # ── Estimate disc radius ──────────────────────────────
         disc_r = estimate_disc_radius(img_rgb, cx, cy, h, w)
+
+        # ── Guardrails: the disc must live inside the retina ──────────
+        # Hard guarantee that the disc centre, the disc circle and the 1r–2r
+        # measurement zone never fall outside the field of view (the cause of
+        # "rings drawn off the image").  An optic disc is ~1/5–1/6 of the FOV
+        # diameter, so cap the radius to a sane fraction of the FOV radius and,
+        # if the centre landed outside the retina, snap it back to the FOV
+        # centre and flag low confidence.
+        disc_r = int(max(0.05 * fov_r, min(disc_r, 0.20 * fov_r)))
+        disc_r = max(disc_r, 12)
+
+        inside = (fov_mask is not None and 0 <= cy < h and 0 <= cx < w
+                  and fov_mask[cy, cx] > 0)
+        if not inside:
+            cx, cy = int(fov_cx), int(fov_cy)
+            confidence = min(confidence, CONFIDENCE_THRESHOLD)
+            flag = (flag + " DISC_SNAPPED_TO_FOV").strip()
+
+        # Keep the centre far enough from the FOV edge that the disc circle
+        # itself stays inside the retina (the zone may still extend outward,
+        # which is expected for a nasal disc).
+        margin = disc_r
+        cx = int(np.clip(cx, fov_cx - fov_r + margin, fov_cx + fov_r - margin))
+        cy = int(np.clip(cy, fov_cy - fov_r + margin, fov_cy + fov_r - margin))
+        cx = int(np.clip(cx, 0, w - 1))
+        cy = int(np.clip(cy, 0, h - 1))
 
         # ── Save overlay ─────────────────────────────────────
         # ── Save overlay ──────────────────────────────────────────────

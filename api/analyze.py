@@ -105,9 +105,11 @@ def filter_step1_by_zone(step1_csv_path: str, disc: dict, h: int, w: int) -> lis
     import numpy as np
 
     cx, cy, r = disc["cx"], disc["cy"], disc["r"]
-    inner_r, outer_r = float(r), float(2 * r)
 
-    kept = []
+    # Read every segment once, tagging it with its centroid distance to the
+    # disc centre.  We decide membership afterwards so we can adaptively widen
+    # the band if the nominal zone is too sparse.
+    rows = []
     try:
         with open(step1_csv_path, newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
@@ -115,17 +117,49 @@ def filter_step1_by_zone(step1_csv_path: str, disc: dict, h: int, w: int) -> lis
                     seg_cx = float(row["centroid_x"])
                     seg_cy = float(row["centroid_y"])
                     dist = float(np.sqrt((seg_cx - cx) ** 2 + (seg_cy - cy) ** 2))
-
-                    # Keep segments whose centroid falls in 1r–2r zone
-                    if inner_r <= dist <= outer_r:
-                        row["centroid_dist"] = round(dist, 1)
-                        row["zone_fraction"] = 1.0
-                        row["in_zone"] = True
-                        kept.append(row)
+                    row["centroid_dist"] = round(dist, 1)
+                    rows.append((dist, row))
                 except (ValueError, TypeError):
                     continue
     except FileNotFoundError:
-        pass
+        return []
+
+    if not rows:
+        return []
+
+    # The Knudtson measurement zone is the 1r–2r annulus around the disc.
+    # The old code required a segment's *centroid* to fall strictly in [r, 2r];
+    # a long vessel crossing the zone whose centroid sits just outside was lost.
+    # Widen the band a little to recover those borderline crossers.
+    inner_r, outer_r = 0.9 * float(r), 2.3 * float(r)
+
+    def _in_band(lo, hi):
+        return [row for dist, row in rows if lo <= dist <= hi]
+
+    kept = _in_band(inner_r, outer_r)
+
+    # Adaptive fallback: a starved zone (a handful of segments) gives Step 4
+    # nothing to split into arterioles vs venules.  If the nominal band is too
+    # sparse, widen it progressively, and as a last resort keep the segments
+    # closest to the annulus.  This trades a little zonal purity for the
+    # ability to produce *any* AVR instead of "insufficient arterioles".
+    MIN_KEEP = 12
+    if len(kept) < MIN_KEEP:
+        for lo, hi in [(0.75 * r, 2.6 * r), (0.5 * r, 3.0 * r)]:
+            kept = _in_band(lo, hi)
+            if len(kept) >= MIN_KEEP:
+                break
+
+    if len(kept) < MIN_KEEP:
+        # Keep the MIN_KEEP segments whose centroid is nearest the zone centre
+        # (1.5r), regardless of band.
+        target = 1.5 * float(r)
+        nearest = sorted(rows, key=lambda dr: abs(dr[0] - target))
+        kept = [row for _, row in nearest[:MIN_KEEP]]
+
+    for row in kept:
+        row["zone_fraction"] = 1.0
+        row["in_zone"] = True
 
     return kept
 
@@ -189,6 +223,29 @@ def run_pipeline(img_path: str, work_dir: str) -> dict:
     import cv2
     import numpy as np
 
+    # ── Downscale very large uploads ──────────────────────────────────
+    # Vessel/AVR analysis doesn't need full sensor resolution, and the Frangi
+    # filter + per-segment processing scale with pixel count — a 3000px fundus
+    # is ~30× slower than a 600px one for no measurable gain.  Cap the longest
+    # side at MAX_DIM and run the whole pipeline on the downscaled copy so disc
+    # coordinates, radii and overlays all stay in one consistent space.
+    MAX_DIM = 1024
+    try:
+        _probe = cv2.imread(img_path, cv2.IMREAD_COLOR)
+        if _probe is not None:
+            _h, _w = _probe.shape[:2]
+            _scale = MAX_DIM / float(max(_h, _w))
+            if _scale < 1.0:
+                _small = cv2.resize(
+                    _probe, (max(1, int(_w * _scale)), max(1, int(_h * _scale))),
+                    interpolation=cv2.INTER_AREA,
+                )
+                _resized_path = os.path.join(work_dir, "input_resized.png")
+                cv2.imwrite(_resized_path, _small)
+                img_path = _resized_path     # everything downstream uses this
+    except Exception:
+        pass  # on any failure, fall back to the original full-res image
+
     stem = Path(img_path).stem
     s1_dir = os.path.join(work_dir, "step1")
     s2_dir = os.path.join(work_dir, "step2")
@@ -216,18 +273,23 @@ def run_pipeline(img_path: str, work_dir: str) -> dict:
     try:
         from step1_segment_skeleton import process_image as step1_fn
 
-        # Try primary sigma range first; if too few segments found, widen range
-        for sigma_high, threshold in [(5, 0.02), (8, 0.01), (10, 0.005)]:
+        # Try a tight, high-quality vessel set first; if too few segments are
+        # found, widen the Frangi scale range AND let a larger fraction of the
+        # strongest vesselness pixels through (keep_percent).  The percentile
+        # threshold makes coverage stable across images, unlike the old fixed
+        # cutoff on a per-image-rescaled map.
+        for sigma_high, keep_percent in [(8, 12), (10, 18), (12, 25)]:
             cfg1 = {
                 "sigma_low":    1,
                 "sigma_high":   sigma_high,
-                "threshold":    threshold,
+                "threshold":    0.01,    # floor — percentile usually dominates
+                "keep_percent": keep_percent,
                 "min_area":     20,      # lowered from 30 for better coverage
                 "workers":      1,
                 "save_overlay": True,
             }
             s1 = step1_fn((img_path, s1_dir, cfg1))
-            if s1.get("status") == "OK" and s1.get("n_segments", 0) >= 4:
+            if s1.get("status") == "OK" and s1.get("n_segments", 0) >= 8:
                 break
 
         result["steps"]["step1"] = s1

@@ -54,25 +54,101 @@ SUPPORTED = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".ppm", ".bmp"}
 # ──────────────────────────────────────────────
 # RETINAL CIRCULAR MASK
 # ──────────────────────────────────────────────
-def make_retinal_mask(h, w, img_gray=None, shrink_px=15):
+def retinal_fov_mask(img_bgr, shrink_frac=0.06, erode_px=7):
     """
-    Auto-detects the true retinal disc centre and radius
-    by finding the largest bright circular region in the image.
-    Falls back to image centre if detection fails.
-    Erodes boundary by 7px to prevent hard edge artefacts.
-    """
-    cx, cy, radius = w // 2, h // 2, min(h, w) // 2  # fallback defaults
+    Detect the retinal field-of-view (FOV) and return a clean interior mask
+    plus its circle geometry: (mask, cx, cy, radius).
 
+    Why colour and not brightness?
+    ------------------------------
+    The original detector thresholded grayscale > 20, which only isolates the
+    retina when the surround is *black* (DRIVE/STARE).  Real uploads often have
+    a white / transparent (checkerboard) surround, so a brightness threshold
+    grabs the whole frame — leaving the bright camera-aperture rim INSIDE the
+    mask.  Frangi then lights up that rim as a giant ring "vessel" and the disc
+    detector locks onto it.
+
+    The retina is the only strongly *coloured* region; black, white and grey
+    checkerboard surrounds all have near-zero saturation.  So we segment on
+    HSV saturation (with a brightness floor), fit the enclosing circle, then
+    shrink it inward by ``shrink_frac`` to discard the bright FOV rim.
+    """
+    h, w = img_bgr.shape[:2]
+    cx, cy, radius = w // 2, h // 2, min(h, w) // 2   # fallback defaults
+
+    try:
+        hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+        S, V = hsv[:, :, 1], hsv[:, :, 2]
+
+        # Coloured + lit → retina.  Excludes black (V≈0), white (S≈0) and grey
+        # checkerboard (S≈0) surrounds alike.
+        fg = ((S > 25) & (V > 25)).astype(np.uint8)
+
+        # If saturation segmentation collapses (unusual greyscale fundus),
+        # fall back to the old brightness rule.
+        if fg.sum() < 0.05 * h * w:
+            gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            fg = (gray > 20).astype(np.uint8)
+
+        # Close holes so the retina is one solid blob, then take the largest
+        # connected region as the FOV.
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        fg = cv2.morphologyEx(fg * 255, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(fg, cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            largest = max(contours, key=cv2.contourArea)
+            # Centre from the contour's moments (the area centroid) — robust to
+            # the ragged boundary.  Radius from the AREA, not minEnclosingCircle:
+            # real fundus circles are often zoomed in and clipped by the frame,
+            # which makes the minimum enclosing circle badly overshoot (it tries
+            # to fit the whole off-screen circle) and shifts its centre.  The
+            # area-equivalent radius √(area/π) stays inside the visible retina,
+            # which is exactly what we want so the bright rim is excluded.
+            M = cv2.moments(largest)
+            area = float(cv2.contourArea(largest))
+            if M["m00"] > 0 and area > 0:
+                cx = int(round(M["m10"] / M["m00"]))
+                cy = int(round(M["m01"] / M["m00"]))
+                eq_r = (area / np.pi) ** 0.5
+                (_, _), enc_r = cv2.minEnclosingCircle(largest)
+                # Prefer the area-equivalent radius, but never exceed the
+                # enclosing circle (smaller-is-safer near the rim).
+                radius = int(min(eq_r, enc_r))
+    except Exception:
+        pass  # silently fall back to defaults
+
+    # Shrink inward by a fraction of the radius to drop the bright FOV rim
+    # (a fixed 15px was not enough on large, high-resolution uploads).
+    radius = max(10, int(radius * (1.0 - shrink_frac)))
+    Y, X = np.ogrid[:h, :w]
+    mask = (np.sqrt((X - cx) ** 2 + (Y - cy) ** 2) <= radius).astype(np.uint8)
+
+    if erode_px > 0:
+        ek = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erode_px, erode_px))
+        mask = cv2.erode(mask, ek, iterations=1)
+
+    return mask, cx, cy, radius
+
+
+def make_retinal_mask(h, w, img_bgr=None, img_gray=None, shrink_px=15):
+    """Backward-compatible wrapper around :func:`retinal_fov_mask`.
+
+    Prefers colour-based FOV detection when the colour image is supplied;
+    otherwise falls back to the legacy brightness threshold on ``img_gray``.
+    """
+    if img_bgr is not None:
+        mask, _, _, _ = retinal_fov_mask(img_bgr)
+        return mask
+
+    # Legacy greyscale path (black surround only)
+    cx, cy, radius = w // 2, h // 2, min(h, w) // 2
     if img_gray is not None:
         try:
-            # Threshold to isolate the lit retinal area
             _, bright = cv2.threshold(img_gray, 20, 255, cv2.THRESH_BINARY)
-
-            # Fill holes so the disc is one solid blob
             kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
             bright = cv2.morphologyEx(bright, cv2.MORPH_CLOSE, kernel)
-
-            # Find largest contour = retinal boundary
             contours, _ = cv2.findContours(bright, cv2.RETR_EXTERNAL,
                                            cv2.CHAIN_APPROX_SIMPLE)
             if contours:
@@ -80,18 +156,13 @@ def make_retinal_mask(h, w, img_gray=None, shrink_px=15):
                 (fx, fy), fr = cv2.minEnclosingCircle(largest)
                 cx, cy, radius = int(fx), int(fy), int(fr)
         except Exception:
-            pass  # silently fall back to defaults
+            pass
 
-    # Shrink inward and erode to kill edge transition artefacts
     radius = max(10, radius - shrink_px)
     Y, X = np.ogrid[:h, :w]
-    dist = np.sqrt((X - cx) ** 2 + (Y - cy) ** 2)
-    mask = (dist <= radius).astype(np.uint8)
-
-    # Erode boundary to soften hard edge before Frangi sees it
+    mask = (np.sqrt((X - cx) ** 2 + (Y - cy) ** 2) <= radius).astype(np.uint8)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     mask = cv2.erode(mask, kernel, iterations=1)
-
     return mask
 
 
@@ -118,15 +189,24 @@ def process_image(args):
         # ── Green channel ─────────────────────────────────────────
         green = img_rgb[:, :, 1].astype(np.float32) / 255.0
 
-        # ── Circular retinal mask ─────────────────────────────────
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        ret_mask = make_retinal_mask(h, w, img_gray=gray, shrink_px=15)
-        green_masked = green * ret_mask
+        # ── Circular retinal mask (colour-based FOV) ──────────────
+        ret_mask, _, _, _ = retinal_fov_mask(img_bgr)
+
+        # ── Illumination / shade correction ───────────────────────
+        # Fundus images have strong, uneven background illumination that
+        # swamps faint arterioles.  Estimate the large-scale background with a
+        # big Gaussian and subtract it so vessels of every calibre stand out
+        # against a flat field.  This is the single biggest lever for keeping
+        # thin arterioles alive into the later steps.
+        green_uint8 = (green * 255.0).astype(np.uint8)
+        bg_sigma = max(h, w) / 25.0
+        background = cv2.GaussianBlur(green_uint8, (0, 0), sigmaX=bg_sigma)
+        # green - background + 128  →  vessels (darker than bg) sit below 128
+        shade = cv2.addWeighted(green_uint8, 1.0, background, -1.0, 128.0)
 
         # ── CLAHE contrast enhancement ────────────────────────────
-        green_uint8 = (green_masked * 255).astype(np.uint8)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        green_clahe = clahe.apply(green_uint8).astype(np.float32) / 255.0
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        green_clahe = clahe.apply(shade).astype(np.float32) / 255.0
         green_clahe = green_clahe * ret_mask          # re-apply mask after CLAHE
 
         # ── Frangi vesselness filter ──────────────────────────────
@@ -145,12 +225,38 @@ def process_image(args):
         vessel_map = vessel_map * ret_mask
 
         # ── Threshold → binary mask ───────────────────────────────
-        vessel_binary = (vessel_map > cfg["threshold"]).astype(np.uint8)
+        # A fixed cutoff on the rescaled map is fragile: rescaling stretches
+        # whatever noise floor each image has, so the same number means very
+        # different things across images.  Instead keep a stable *fraction* of
+        # the strongest vesselness pixels inside the retina (percentile
+        # threshold), and never go below the caller's floor.  `keep_percent`
+        # is widened by the orchestrator's retry loop when too few segments
+        # are found.
+        keep_percent = cfg.get("keep_percent")
+        if keep_percent:
+            vals = vessel_map[ret_mask > 0]
+            vals = vals[vals > 1e-6]
+            if vals.size:
+                pct_thr = float(np.percentile(vals, 100.0 - keep_percent))
+                thr = max(pct_thr, cfg["threshold"])
+            else:
+                thr = cfg["threshold"]
+        else:
+            thr = cfg["threshold"]
+        vessel_binary = (vessel_map > thr).astype(np.uint8)
 
-        # Morphological clean-up: remove tiny speckle noise
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        vessel_binary = cv2.morphologyEx(vessel_binary, cv2.MORPH_OPEN, kernel)
-        vessel_binary = vessel_binary * ret_mask      # final mask enforcement
+        # ── Morphological clean-up ─────────────────────────────────
+        # 1) A light *close* bridges the 1–2px gaps that Frangi leaves at
+        #    crossings and faint stretches, so a vessel stays one connected
+        #    object instead of fragmenting into sub-min_area pieces.
+        # 2) remove_small_objects deletes isolated speckle WITHOUT the
+        #    thinning that MORPH_OPEN inflicted on genuine thin arterioles.
+        close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        vessel_binary = cv2.morphologyEx(vessel_binary, cv2.MORPH_CLOSE, close_k)
+        vessel_bool = morphology.remove_small_objects(
+            vessel_binary.astype(bool), min_size=25
+        )
+        vessel_binary = (vessel_bool & (ret_mask > 0)).astype(np.uint8)
 
         # ── Skeletonise → single-pixel centrelines ────────────────
         skeleton = morphology.skeletonize(vessel_binary.astype(bool)).astype(np.uint8)

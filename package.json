@@ -3,11 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "concurrently -k -n \"FLASK,NEXT\" -c \"yellow,cyan\" \"python3 api/analyze.py\" \"next dev\"",
+    "dev": "concurrently -k -n \"FLASK,NEXT\" -c \"yellow,cyan\" \"python api/analyze.py\" \"next dev\"",
     "dev:next": "next dev",
-    "dev:api": "python3 api/analyze.py",
+    "dev:api": "python api/analyze.py",
     "build": "next build",
-    "start": "next start -p ${PORT:-3000}",
+    "start": "next start",
     "lint": "next lint"
   },
   "dependencies": {

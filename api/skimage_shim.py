@@ -102,28 +102,82 @@ class morphology:
     @staticmethod
     def skeletonize(binary_image):
         """
-        Morphological skeletonization via iterated erosion/subtraction.
-        Equivalent to scikit-image's skeletonize() for boolean arrays.
-        Uses OpenCV for speed; result is a bool ndarray.
+        Zhang–Suen thinning → single-pixel-wide 8-connected centrelines,
+        matching scikit-image's skeletonize() for the pipeline's purposes.
+
+        The earlier implementation here was a *morphological* skeleton
+        (iterated erosion/subtraction).  That produces a thick, ragged result
+        in which ~half the pixels have 3+ neighbours, so Step 1's branch-point
+        removal shattered every vessel into sub-min_area fragments and almost
+        no segments survived — the primary cause of "insufficient arterioles".
+        A true thinning yields clean centrelines with few genuine branch
+        points, so whole vessels survive as measurable segments.
         """
-        import cv2
+        img = (np.asarray(binary_image) > 0).astype(np.uint8)
+        if img.sum() == 0:
+            return img.astype(bool)
 
-        img = np.asarray(binary_image, dtype=np.uint8)
-        img = np.where(img > 0, np.uint8(255), np.uint8(0))
+        def _neighbors(im):
+            # P2..P9 clockwise from north (scikit-image / Zhang–Suen order)
+            up, dn = np.roll(im, 1, 0), np.roll(im, -1, 0)
+            P2, P6 = up, dn
+            P4 = np.roll(im, -1, 1)
+            P8 = np.roll(im, 1, 1)
+            P3 = np.roll(up, -1, 1)
+            P9 = np.roll(up, 1, 1)
+            P5 = np.roll(dn, -1, 1)
+            P7 = np.roll(dn, 1, 1)
+            return P2, P3, P4, P5, P6, P7, P8, P9
 
-        skel   = np.zeros_like(img)
-        kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+        def _transitions(seq):
+            # A(P1): number of 0→1 transitions in the cyclic sequence P2..P9,P2
+            a = np.zeros(seq[0].shape, dtype=np.uint8)
+            ordered = list(seq) + [seq[0]]
+            for k in range(len(seq)):
+                a += ((ordered[k] == 0) & (ordered[k + 1] == 1)).astype(np.uint8)
+            return a
 
         while True:
-            eroded  = cv2.erode(img, kernel)
-            opened  = cv2.dilate(eroded, kernel)
-            temp    = cv2.subtract(img, opened)
-            skel    = cv2.bitwise_or(skel, temp)
-            img     = eroded
-            if cv2.countNonZero(img) == 0:
+            changed = 0
+            for step in (0, 1):
+                P2, P3, P4, P5, P6, P7, P8, P9 = _neighbors(img)
+                B = P2 + P3 + P4 + P5 + P6 + P7 + P8 + P9
+                A = _transitions((P2, P3, P4, P5, P6, P7, P8, P9))
+                cond = (img == 1) & (B >= 2) & (B <= 6) & (A == 1)
+                if step == 0:
+                    cond &= (P2 * P4 * P6 == 0) & (P4 * P6 * P8 == 0)
+                else:
+                    cond &= (P2 * P4 * P8 == 0) & (P2 * P6 * P8 == 0)
+                # Don't let np.roll's wrap-around delete real border pixels
+                cond[0, :] = cond[-1, :] = cond[:, 0] = cond[:, -1] = False
+                n = int(cond.sum())
+                if n:
+                    img[cond] = 0
+                    changed += n
+            if changed == 0:
                 break
 
-        return skel.astype(bool)
+        return img.astype(bool)
+
+    @staticmethod
+    def remove_small_objects(binary_image, min_size=64, connectivity=1):
+        """
+        Remove connected components smaller than ``min_size`` pixels.
+        Mirrors scikit-image's morphology.remove_small_objects for boolean
+        input: returns a bool ndarray with small blobs cleared.
+        """
+        from scipy.ndimage import label as _sp_label
+
+        arr = np.asarray(binary_image, dtype=bool)
+        # connectivity=1 → 4-connected, 2 → 8-connected (scikit-image semantics)
+        structure = np.ones((3, 3), dtype=np.int32) if connectivity >= 2 else None
+        labeled, n = _sp_label(arr, structure=structure)
+        if n == 0:
+            return arr
+        counts = np.bincount(labeled.ravel())
+        too_small = counts < min_size
+        too_small[0] = False                      # never touch the background
+        return arr & ~too_small[labeled]
 
 
 # ── skimage.measure ───────────────────────────────────────────────────

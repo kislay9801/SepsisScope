@@ -25,6 +25,9 @@ out/
 out.zip
 *.zip
 
+# Local test images and debug overlays
+sample/
+
 # Data (large image datasets — commit only if small/versioned)
 data/
 
