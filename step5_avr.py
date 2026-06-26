@@ -74,6 +74,26 @@ def knudtson_combine(widths, vessel_type='arteriole'):
 
 
 # ──────────────────────────────────────────────
+# WIDTH OUTLIER REMOVAL
+# ──────────────────────────────────────────────
+def _drop_width_outliers(vessels):
+    """Remove vessels whose width is a Tukey upper-fence outlier (Q3 + 1.5·IQR).
+
+    ``vessels`` is a list of (width, confidence, row) tuples.  Returns the same
+    structure with extreme-width artefacts removed.  Needs at least 4 vessels
+    to estimate the spread; otherwise returns the input unchanged.
+    """
+    if len(vessels) < 4:
+        return vessels
+    widths = np.array([w for (w, _, _) in vessels], dtype=float)
+    q1, q3 = np.percentile(widths, [25, 75])
+    upper = q3 + 1.5 * (q3 - q1)
+    kept = [v for v in vessels if v[0] <= upper]
+    # Never drop everything; if the fence is degenerate keep the originals.
+    return kept if kept else vessels
+
+
+# ──────────────────────────────────────────────
 # PROCESS ONE IMAGE
 # ──────────────────────────────────────────────
 def compute_avr(classified_csv, out_dir, stem, min_vessels=6):
@@ -95,6 +115,19 @@ def compute_avr(classified_csv, out_dir, stem, min_vessels=6):
                 venules.append((float(r['width_px']), float(r['confidence']), r))
             except (ValueError, TypeError):
                 pass
+
+    # ── Drop width outliers before measuring ──────────────────────────
+    # Vessels that merge near the optic disc (or touch a bright lesion) get
+    # read by the distance transform as one abnormally thick vessel.  A single
+    # such artefact dominates CRAE/CRVE under the Knudtson formula and drags AVR
+    # away from reality (it was a major reason normal eyes scored ~0.3–0.4).
+    # Remove widths above the standard Tukey upper fence (Q3 + 1.5·IQR) for each
+    # class.  Only trims genuine outliers; if there aren't enough vessels to
+    # judge spread (<4), leave them untouched.
+    n_art_before, n_ven_before = len(arterioles), len(venules)
+    arterioles = _drop_width_outliers(arterioles)
+    venules    = _drop_width_outliers(venules)
+    n_outliers = (n_art_before - len(arterioles)) + (n_ven_before - len(venules))
 
     if len(arterioles) < min_vessels:
         return {
@@ -158,16 +191,19 @@ def compute_avr(classified_csv, out_dir, stem, min_vessels=6):
         writer.writerows(avr_rows)
 
     return {
-        "file":         stem,
-        "status":       "OK",
-        "n_arterioles": len(arterioles),
-        "n_venules":    len(venules),
-        "art_widths":   [round(w, 3) for w in art_widths],
-        "ven_widths":   [round(w, 3) for w in ven_widths],
-        "CRAE":         CRAE,
-        "CRVE":         CRVE,
-        "AVR":          AVR,
-        "flag":         flag,
+        "file":           stem,
+        "status":         "OK",
+        "n_arterioles":   len(arterioles),
+        "n_venules":      len(venules),
+        "n_outliers":     n_outliers,        # width artefacts dropped before AVR
+        "n_used_art":     len(top6_art),     # arterioles actually feeding CRAE
+        "n_used_ven":     len(top6_ven),     # venules actually feeding CRVE
+        "art_widths":     [round(w, 3) for w in art_widths],
+        "ven_widths":     [round(w, 3) for w in ven_widths],
+        "CRAE":           CRAE,
+        "CRVE":           CRVE,
+        "AVR":            AVR,
+        "flag":           flag,
     }
 
 

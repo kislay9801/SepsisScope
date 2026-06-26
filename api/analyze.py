@@ -421,6 +421,24 @@ def run_pipeline(img_path: str, work_dir: str) -> dict:
 
     result["steps"]["step5"] = s5
 
+    # ── Accept/Reject visualisation ───────────────────────────────────
+    # Colour every detected vessel by what happened to it, so the user can
+    # SEE which vessels were accepted (used for the AVR) and which were
+    # rejected — and why.
+    try:
+        inzone_ids = set()
+        for s in kept_segments:
+            try:
+                inzone_ids.add(int(float(s["segment_id"])))
+            except (ValueError, KeyError, TypeError):
+                pass
+        audit_path = os.path.join(s4_dir, f"{stem}_audit.png")
+        if _draw_audit_overlay(img_rgb, disc, inzone_ids,
+                               s1_dir, s4_dir, s5_dir, stem, audit_path):
+            result["images"]["audit"] = img_to_base64(audit_path)
+    except Exception:
+        pass
+
     # ── Build final result ────────────────────────────────────────────
     avr  = s5.get("AVR")
     crae = s5.get("CRAE")
@@ -480,12 +498,196 @@ def run_pipeline(img_path: str, work_dir: str) -> dict:
             "method":     s2.get("method"),
             "flag":       s2.get("flag", ""),
         },
+        # Full accept/reject funnel: where every detected vessel ended up, so
+        # the user can see exactly which were used for the AVR and why the rest
+        # were dropped.  Stages are sequential — each "rejected_*" count is
+        # removed before the next stage.
+        "vessel_audit": _build_vessel_audit(s1, s3, s4, s5),
+        # How much to trust this AVR (automated A/V classification is noisy).
+        "reliability": _assess_reliability(s4, s5, s2, avr),
     }
 
     # Always return success — let the flag communicate the quality of the result
     result["status"] = "success"
     result.pop("error", None)
     return result
+
+
+def _draw_audit_overlay(img_rgb, disc: dict, inzone_ids: set,
+                        s1_dir, s4_dir, s5_dir, stem, out_path):
+    """Colour every vessel segment by its fate in the pipeline.
+
+    Reproduces Step 1's exact labelling (full skeleton → remove branch points →
+    label) so each region's label equals the ``segment_id`` recorded in the
+    CSVs, letting us match each vessel to its outcome without fuzzy centroid
+    matching:
+
+      green  — accepted, used to compute the AVR   (present in the AVR CSV)
+      orange — classified A/V but not used         (width outlier / beyond top-6)
+      yellow — rejected: colour too ambiguous      (label = uncertain)
+      blue   — in zone but not classified          (Step 4 skipped it)
+      red    — rejected: outside the 1r–2r zone
+    """
+    import cv2
+    import numpy as np
+    from skimage import measure
+    from step1_segment_skeleton import _find_branch_points
+
+    skel_path = os.path.join(s1_dir, f"{stem}_skeleton.png")
+    skel = cv2.imread(skel_path, cv2.IMREAD_GRAYSCALE)
+    if skel is None:
+        return False
+
+    skel_bin = (skel > 127).astype(np.uint8)
+    branch = _find_branch_points(skel_bin)
+    skel_nb = skel_bin.copy()
+    skel_nb[branch == 1] = 0
+    labeled = measure.label(skel_nb, connectivity=2)
+
+    def _read_ids(path):
+        d = {}
+        try:
+            with open(path, newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    try:
+                        d[int(float(row["segment_id"]))] = row
+                    except (ValueError, KeyError, TypeError):
+                        continue
+        except FileNotFoundError:
+            pass
+        return d
+
+    classified = _read_ids(os.path.join(s4_dir, f"{stem}_classified.csv"))
+    used_ids = set(_read_ids(os.path.join(s5_dir, f"{stem}_avr.csv")).keys())
+
+    # Colours in RGB
+    C_ACCEPT  = [0, 220, 90]
+    C_OUTLIER = [255, 140, 0]
+    C_UNCERT  = [245, 215, 0]
+    C_INZONE  = [70, 150, 240]
+    C_OOZ     = [205, 70, 70]
+
+    h, w = skel_bin.shape
+    paint = np.zeros((h, w, 3), dtype=np.uint8)
+    painted = np.zeros((h, w), dtype=np.uint8)
+
+    for reg in measure.regionprops(labeled):
+        sid = reg.label
+        if sid in used_ids:
+            col = C_ACCEPT
+        elif sid in classified:
+            lbl = (classified[sid].get("label") or "").strip()
+            col = C_UNCERT if lbl == "uncertain" else C_OUTLIER
+        elif sid in inzone_ids:
+            col = C_INZONE
+        else:
+            col = C_OOZ
+        paint[reg.coords[:, 0], reg.coords[:, 1]] = col
+        painted[reg.coords[:, 0], reg.coords[:, 1]] = 1
+
+    # Thicken thin centrelines so they're visible at a glance.
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    paint = cv2.dilate(paint, k, iterations=1)
+    painted = cv2.dilate(painted, k, iterations=1)
+
+    overlay = img_rgb.copy()
+    overlay[painted > 0] = paint[painted > 0]
+
+    # Draw disc + 1r/2r rings on top for context.
+    cx, cy, r = disc["cx"], disc["cy"], disc["r"]
+    cv2.circle(overlay, (cx, cy), r,     [120, 120, 255], 1)
+    cv2.circle(overlay, (cx, cy), 2 * r, [120, 120, 255], 1)
+    cv2.circle(overlay, (cx, cy), 3,     [255,   0,   0], -1)
+
+    overlay_bgr = cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR)
+    cv2.putText(overlay_bgr, f"accepted={len(used_ids)}", (10, 22),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 0), 1, cv2.LINE_AA)
+    cv2.imwrite(out_path, overlay_bgr)
+    return True
+
+
+def _assess_reliability(s4: dict, s5: dict, s2: dict, avr) -> dict:
+    """Judge how much to trust this AVR.
+
+    Automated arteriole/venule classification from a single image is inherently
+    noisy, so we surface an honest confidence level instead of presenting every
+    number as exact.  Signals, strongest first:
+
+      • AVR > 1.0       — arterioles measured WIDER than venules, which
+                          essentially never happens in a real eye → the A/V
+                          labels were probably swapped on some vessels.
+      • few vessels     — fewer than ~8 measured → a couple of errors swing it.
+      • weak separation — arterioles/venules barely separate in colour.
+      • low disc conf   — the whole measurement zone may be mislocated.
+    """
+    if avr is None:
+        return {"level": "n/a", "score": 0,
+                "reasons": ["No AVR was produced for this image."]}
+
+    used = (s5.get("n_used_art", 0) + s5.get("n_used_ven", 0)) \
+        if s5.get("status") == "OK" else 0
+    separation = float(s4.get("separation", 0) or 0)
+    disc_conf  = float(s2.get("confidence", 0) or 0)
+
+    score = 100
+    reasons = []
+
+    if avr > 1.0:
+        score -= 45
+        reasons.append("AVR above 1.0 is physiologically unusual — arteriole/"
+                       "venule labels may be swapped on some vessels.")
+    if used < 8:
+        score -= 30
+        reasons.append(f"Only {used} vessels measured — too few for a stable AVR.")
+    elif used < 10:
+        score -= 12
+        reasons.append(f"{used} vessels measured — a modest sample.")
+    if separation < 1.8:
+        score -= 18
+        reasons.append("Arterioles and venules separate weakly by colour, so "
+                       "the classification is uncertain.")
+    if disc_conf < 0.45:
+        score -= 15
+        reasons.append("Low optic-disc detection confidence — the measurement "
+                       "zone may be off.")
+
+    score = max(0, min(100, score))
+    level = "high" if score >= 70 else "moderate" if score >= 45 else "low"
+    if not reasons:
+        reasons.append("Vessel classification and counts look consistent.")
+    return {"level": level, "score": score, "reasons": reasons}
+
+
+def _build_vessel_audit(s1: dict, s3: dict, s4: dict, s5: dict) -> dict:
+    """Trace every detected vessel through the accept/reject funnel.
+
+    Sequential stages (each rejected count is removed before the next):
+      detected → [reject: outside zone] → in zone
+               → [reject: uncertain colour] → classified A/V
+               → [reject: width outlier]    → used for the AVR
+    """
+    detected   = s1.get("n_segments", 0)
+    in_zone    = s3.get("n_kept", 0)
+    out_zone   = s3.get("n_rejected", max(0, detected - in_zone))
+    arterioles = s4.get("n_arteriole", 0)
+    venules    = s4.get("n_venule", 0)
+    uncertain  = s4.get("n_uncertain", 0)
+    outliers   = s5.get("n_outliers", 0) if s5.get("status") == "OK" else 0
+    used_art   = s5.get("n_used_art", 0) if s5.get("status") == "OK" else 0
+    used_ven   = s5.get("n_used_ven", 0) if s5.get("status") == "OK" else 0
+
+    return {
+        "detected":               detected,
+        "rejected_outside_zone":  out_zone,
+        "in_zone":                in_zone,
+        "rejected_uncertain":     uncertain,
+        "classified_arterioles":  arterioles,
+        "classified_venules":     venules,
+        "rejected_width_outlier": outliers,
+        "used_arterioles":        used_art,
+        "used_venules":           used_ven,
+        "used_total":             used_art + used_ven,
+    }
 
 
 def _draw_zone_overlay_full(img_rgb, disc: dict, kept_segments: list[dict],

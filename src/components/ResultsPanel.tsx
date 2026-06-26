@@ -6,10 +6,99 @@ import {
 } from "lucide-react";
 import { AVRGauge } from "./AVRGauge";
 import { ImageViewer } from "./ImageViewer";
-import type { AnalysisResponse } from "@/types";
+import type { AnalysisResponse, VesselAudit, Reliability } from "@/types";
 
 interface ResultsPanelProps {
   data: AnalysisResponse;
+}
+
+/** Honest confidence banner — automated A/V classification is noisy. */
+function ReliabilityBanner({ reliability }: { reliability: Reliability }) {
+  if (reliability.level === "n/a") return null;
+  const styles: Record<string, { bg: string; border: string; text: string; label: string }> = {
+    high:     { bg: "bg-emerald-50", border: "border-emerald-200", text: "text-emerald-700", label: "High confidence" },
+    moderate: { bg: "bg-amber-50",   border: "border-amber-200",   text: "text-amber-700",   label: "Moderate confidence — interpret with care" },
+    low:      { bg: "bg-red-50",     border: "border-red-200",     text: "text-red-700",     label: "Low confidence — treat as a rough estimate" },
+  };
+  const c = styles[reliability.level] ?? styles.low;
+  return (
+    <div className={`mt-3 rounded-lg border px-3 py-2 ${c.bg} ${c.border}`}>
+      <div className="flex items-center gap-2">
+        {reliability.level === "high"
+          ? <CheckCircle2 size={13} className={c.text} />
+          : <AlertTriangle size={13} className={c.text} />}
+        <span className={`text-xs font-semibold ${c.text}`}>
+          {c.label}
+        </span>
+        <span className={`ml-auto text-[10px] font-medium ${c.text} opacity-70`}>
+          {reliability.score}/100
+        </span>
+      </div>
+      {reliability.level !== "high" && reliability.reasons.length > 0 && (
+        <ul className="mt-1.5 space-y-0.5 pl-5 list-disc">
+          {reliability.reasons.map((r, i) => (
+            <li key={i} className={`text-[11px] leading-snug ${c.text} opacity-90`}>{r}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Shows the journey of every detected vessel: accepted (green, fed into the
+ * AVR) vs rejected at each stage (with the reason). Stages are sequential.
+ */
+function VesselFunnel({ audit }: { audit: VesselAudit }) {
+  const rows: Array<{ label: string; n: number; kind: "accept" | "reject"; hint: string }> = [
+    { label: "Detected vessel segments", n: audit.detected, kind: "accept", hint: "found in Step 1" },
+    { label: "Rejected — outside measurement zone", n: audit.rejected_outside_zone, kind: "reject", hint: "not in the 1r–2r ring around the disc" },
+    { label: "Rejected — colour too ambiguous", n: audit.rejected_uncertain, kind: "reject", hint: "could not call arteriole vs venule" },
+    { label: "Rejected — abnormal width (artefact)", n: audit.rejected_width_outlier, kind: "reject", hint: "likely merged vessels near the disc" },
+    { label: "Accepted — used for AVR", n: audit.used_total, kind: "accept", hint: `${audit.used_arterioles} arterioles · ${audit.used_venules} venules` },
+  ];
+
+  return (
+    <div className="card p-4">
+      <p className="label-text mb-3">Vessel Acceptance Breakdown</p>
+      <div className="space-y-1.5">
+        {rows.map((r) => (
+          <div
+            key={r.label}
+            className={`flex items-center gap-3 rounded-lg border px-3 py-2 ${
+              r.kind === "accept"
+                ? "bg-emerald-50 border-emerald-200"
+                : "bg-slate-50 border-slate-200"
+            }`}
+          >
+            <div
+              className={`text-base font-bold tabular-nums w-8 text-center ${
+                r.kind === "accept" ? "text-emerald-700" : "text-slate-400"
+              }`}
+            >
+              {r.n}
+            </div>
+            <div className="min-w-0">
+              <div
+                className={`text-xs font-semibold ${
+                  r.kind === "accept" ? "text-emerald-800" : "text-slate-600"
+                }`}
+              >
+                {r.label}
+              </div>
+              <div className="text-[10px] text-slate-400">{r.hint}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <p className="text-[10px] text-slate-400 mt-2.5 leading-relaxed">
+        Of <strong>{audit.detected}</strong> detected, <strong>{audit.in_zone}</strong> fell
+        in the measurement zone; <strong>{audit.classified_arterioles + audit.classified_venules}</strong>{" "}
+        were classified and <strong>{audit.used_total}</strong> survived quality checks to
+        compute the AVR. Accepted vessels are highlighted green in the zone &amp; classification overlays below.
+      </p>
+    </div>
+  );
 }
 
 function MetricBox({ label, value, unit, sub }: {
@@ -108,6 +197,8 @@ export function ResultsPanel({ data }: ResultsPanelProps) {
         </div>
 
         <FlagBanner flag={result.flag} />
+
+        {result.reliability && <ReliabilityBanner reliability={result.reliability} />}
       </div>
 
       {/* Clinical interpretation */}
@@ -125,6 +216,11 @@ export function ResultsPanel({ data }: ResultsPanelProps) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Vessel accept/reject funnel */}
+      {result.vessel_audit && (
+        <VesselFunnel audit={result.vessel_audit} />
       )}
 
       {/* Segment statistics */}

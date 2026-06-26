@@ -27,6 +27,8 @@ out.zip
 
 # Local test images and debug overlays
 sample/
+# Downloaded image datasets (e.g. Kaggle normal-eye set)
+0.0.Normal/
 
 # Data (large image datasets — commit only if small/versioned)
 data/

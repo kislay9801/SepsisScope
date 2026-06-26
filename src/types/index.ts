@@ -23,6 +23,25 @@ export interface SegmentCounts {
   uncertain: number;
 }
 
+export interface VesselAudit {
+  detected: number;
+  rejected_outside_zone: number;
+  in_zone: number;
+  rejected_uncertain: number;
+  classified_arterioles: number;
+  classified_venules: number;
+  rejected_width_outlier: number;
+  used_arterioles: number;
+  used_venules: number;
+  used_total: number;
+}
+
+export interface Reliability {
+  level: "high" | "moderate" | "low" | "n/a";
+  score: number;
+  reasons: string[];
+}
+
 export interface AnalysisResult {
   AVR: number | null;
   CRAE: number | null;
@@ -31,6 +50,8 @@ export interface AnalysisResult {
   interpretation: string;
   segments: SegmentCounts;
   disc: DiscInfo;
+  vessel_audit?: VesselAudit;
+  reliability?: Reliability;
 }
 
 export interface AnalysisImages {
@@ -39,6 +60,7 @@ export interface AnalysisImages {
   disc?: string;
   zone?: string;
   classified?: string;
+  audit?: string;
 }
 
 export interface AnalysisResponse {

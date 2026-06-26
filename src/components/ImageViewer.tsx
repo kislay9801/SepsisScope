@@ -12,6 +12,7 @@ const TABS: Tab[] = [
   { key: "disc",       label: "Disc",     description: "Optic disc detection",          dot: "bg-yellow-500" },
   { key: "zone",       label: "Zone",     description: "1r–2r measurement zone",        dot: "bg-blue-500" },
   { key: "classified", label: "A/V Map",  description: "Arteriole/venule classification", dot: "bg-red-500" },
+  { key: "audit",      label: "Accept/Reject", description: "Which vessels were accepted vs rejected", dot: "bg-emerald-500" },
 ];
 
 export function ImageViewer({ images }: { images: AnalysisImages }) {
@@ -107,6 +108,15 @@ export function ImageViewer({ images }: { images: AnalysisImages }) {
           <span className="flex items-center gap-1"><span className="w-3 h-1.5 rounded-sm bg-emerald-500 inline-block" /> Kept</span>
           <span className="flex items-center gap-1"><span className="w-3 h-1.5 rounded-sm bg-red-500 inline-block" /> Rejected</span>
           <span className="flex items-center gap-1"><span className="w-3 h-1.5 rounded-sm bg-blue-400 inline-block" /> 1r/2r rings</span>
+        </div>
+      )}
+      {activeTab === "audit" && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-500">
+          <span className="flex items-center gap-1"><span className="w-3 h-1.5 rounded-sm bg-emerald-500 inline-block" /> Accepted (used for AVR)</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-1.5 rounded-sm bg-orange-500 inline-block" /> Classified, not used</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-1.5 rounded-sm bg-yellow-400 inline-block" /> Uncertain</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-1.5 rounded-sm bg-blue-500 inline-block" /> In zone, unclassified</span>
+          <span className="flex items-center gap-1"><span className="w-3 h-1.5 rounded-sm bg-red-400 inline-block" /> Outside zone</span>
         </div>
       )}
     </div>
