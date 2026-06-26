@@ -27,8 +27,10 @@ out.zip
 
 # Local test images and debug overlays
 sample/
-# Downloaded image datasets (e.g. Kaggle normal-eye set)
-0.0.Normal/
+# Downloaded image datasets — Kaggle disease-category folders are named
+# "<number>.<name>" (e.g. 0.0.Normal, 11.Severe hypertensive retinopathy).
+# Ignore every top-level folder that starts with a digit.
+/[0-9]*/
 
 # Data (large image datasets — commit only if small/versioned)
 data/
