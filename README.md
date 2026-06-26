@@ -17,8 +17,8 @@ A professionally-designed web application for automated retinal fundus image ana
 | 1    | Vessel Segmentation  | Shade correction + CLAHE + Frangi vesselness + Zhang–Suen thinning  |
 | 2    | Optic Disc Detection | Fused vessel-density × brightness, confined to the retina (FOV)     |
 | 3    | Zone Filtering       | Adaptive 1r–2r annular zone around the optic disc                   |
-| 4    | A/V Classification   | Colour score + width normalisation                                  |
-| 5    | AVR Calculation      | Knudtson-modified Hubbard formula (2003)                            |
+| 4    | A/V Classification   | Central light-reflex ratio, median split (width never used)         |
+| 5    | AVR Calculation      | Knudtson-modified Hubbard formula (2003), width-outlier trimmed      |
 
 ### Robustness & preprocessing
 
@@ -43,6 +43,18 @@ The pipeline is built to handle real-world uploads, not just clean research-data
 - **Auto-downscaling** — uploads larger than 1024 px on the longest side are
   resized before processing, keeping analysis fast (a few seconds) regardless of
   source resolution.
+- **A/V classification by the central light reflex** — arterioles have a bright
+  reflective stripe down their centre, so each vessel's centre-line brightness
+  is compared with its whole-vessel brightness. Width is **never** used to
+  classify (that would bias the very widths Step 5 measures).
+- **Width-outlier trimming** — vessels that merge near the disc read as one
+  abnormally thick vessel; these Tukey-fence outliers are dropped before the
+  Knudtson formula so a single artefact can't dominate CRVE.
+- **Reliability indicator** — every result carries a confidence level
+  (high / moderate / low) with reasons (e.g. implausible AVR > 1, too few
+  vessels, weak A/V colour separation, low disc confidence), shown in the UI.
+- **Vessel acceptance breakdown** — an overlay + funnel show exactly which
+  detected vessels were accepted vs rejected (and why) at each stage.
 
 ## AVR Reference Ranges
 
@@ -51,6 +63,33 @@ The pipeline is built to handle real-world uploads, not just clean research-data
 | < 0.6     | **Low AVR** — arteriolar narrowing (hypertension, cardiovascular risk, sepsis) |
 | 0.6 – 0.8 | **Normal** — healthy microvascular calibre                                     |
 | > 0.8     | **High AVR** — venular dilation (inflammation, metabolic syndrome)             |
+
+## Validation & Limitations
+
+> **This tool produces an AVR _estimate_. It is not validated for disease detection.**
+
+The pipeline was tested on a 38-image normal-eye dataset and a 15-image severe
+hypertensive-retinopathy dataset:
+
+- **On normal eyes** the AVR estimate is stable and centred near the lower end of
+  the normal range (mean ≈ 0.56, low scatter, no label flips).
+- **It does not separate hypertensive from normal eyes** (AUC ≈ 0.4 across five
+  different classification features, including an oximetry-based optical-density
+  ratio). Healthy and hypertensive distributions overlap almost completely.
+
+This is a fundamental limit of fully-automated, single-image AVR, not a tuning
+bug, for two reasons:
+
+1. **Artery/vein colour difference is tiny** in an uncalibrated fundus photo and
+   is swamped by illumination, camera, and exposure variation — so unsupervised
+   classification is inherently noisy.
+2. **We measure outer vessel calibre**, but hypertensive narrowing is of the
+   blood-column (lumen), which the outer width barely reflects.
+
+Clinical-grade AVR would require a **supervised deep-learning artery/vein
+classifier** (e.g. trained on RITE / INSPIRE-AVR / VICAVR) plus lumen-aware,
+full-resolution calibre measurement, and ground-truth AVRs for validation. That
+is deliberately out of scope here — treat the output as a research estimate.
 
 ## Local Development
 

@@ -39,8 +39,11 @@ export function AVRGauge({ value, flag, animated = true }: AVRGaugeProps) {
   // SVG geometry — half-circle gauge
   const cx = 110, cy = 100, r = 80, sw = 12;
   const clamp = Math.min(Math.max(displayed, 0), 1.2);
+  // Gauge angle: π (left) at AVR 0 → 0 (right) at AVR 1.2. The needle must use
+  // the SAME mapping as the coloured zones below (x = cx + r·cos(angle)),
+  // otherwise it ends up mirrored and points at the wrong zone.
   const angleRad = Math.PI - (clamp / 1.2) * Math.PI;
-  const nx = cx + r * Math.cos(Math.PI - angleRad);
+  const nx = cx + r * Math.cos(angleRad);
   const ny = cy - r * Math.sin(angleRad);
 
   function arc(a0: number, a1: number) {
