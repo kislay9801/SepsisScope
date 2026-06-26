@@ -305,6 +305,22 @@ def process_image(args):
             # Colour score: arterioles redder, venules darker/greener
             color_score = r_mean / (g_mean + b_mean + 1e-6)
 
+            # Central light reflex: arterioles have a bright reflective stripe
+            # down their centre (the vessel-wall light reflex); venules are
+            # darker and uniform.  Compare the centre-line brightness (g_mean,
+            # already measured on the skeleton) against the whole-vessel
+            # brightness: arteriole centre-line > whole vessel ⇒ ratio > 1,
+            # venule ≈ uniform ⇒ ratio ≈ 1.  This is a far more specific A/V cue
+            # than overall brightness alone.
+            rad = max(1, int(round(avg_width_px / 2.0)))
+            dil_k = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1))
+            seg_dil = cv2.dilate(seg_mask, dil_k)
+            vessel_pixels = (seg_dil > 0) & (vessel_binary > 0)
+            green_full = img_rgb[:, :, 1][vessel_pixels]
+            whole_green = float(green_full.mean()) if green_full.size else g_mean
+            reflex_ratio = float(g_mean / (whole_green + 1e-6))
+
             # Vessel contrast: how different is the vessel from its local background
             local_bg = _local_background_mean(img_rgb[:, :, 1], coords)
             contrast = float(abs(g_mean - local_bg))
@@ -323,6 +339,7 @@ def process_image(args):
                 "g_mean":      round(g_mean, 3),
                 "b_mean":      round(b_mean, 3),
                 "color_score": round(color_score, 5),
+                "reflex_ratio": round(reflex_ratio, 5),
                 "contrast":    round(contrast, 3),
                 "centroid_x":  round(cx_seg, 1),
                 "centroid_y":  round(cy_seg, 1),

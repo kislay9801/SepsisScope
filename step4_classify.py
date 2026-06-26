@@ -65,26 +65,30 @@ def classify_image(filtered_csv, step1_out, out_dir, stem,
     # Parse values once — skip rows with missing/invalid measurements.
     # Keep the parsed numbers alongside the row so we don't re-parse later.
     #
-    # A/V discriminator = GREEN-channel brightness of the vessel.
-    # Venules carry deoxygenated blood, absorb more light and appear *darker*
-    # (especially in green); arterioles appear brighter.  So high green = more
-    # likely arteriole.  An earlier version used colour_score = r/(g+b), but on
-    # a 38-image normal dataset that feature flipped the A/V labels on ~34% of
-    # images (AVR landed >1, e.g. 1.2–2.1 on healthy eyes) because r/(g+b) is
-    # confounded by overall darkness — a dark wide venule can score higher than
-    # a bright arteriole.  Green brightness centred the same dataset on the
-    # physiological ~0.67 and roughly halved the flip rate.  Width is NEVER used
-    # to classify (that would bias the very widths Step 5 measures).
+    # A/V discriminator = CENTRAL LIGHT REFLEX (reflex_ratio from Step 1).
+    # Arterioles have a bright reflective stripe down their centre (vessel-wall
+    # light reflex), so their centre-line is brighter than the whole vessel
+    # (ratio > 1); venules are darker and uniform (ratio ≈ 1).  This is a far
+    # more specific arteriole/venule cue than overall brightness.
+    #
+    # History: colour_score = r/(g+b) flipped labels on ~34% of normal eyes
+    # (confounded by darkness); plain green brightness centred the normal set on
+    # ~0.67 but still scattered and skewed hypertensive eyes high.  The light
+    # reflex targets the actual physiological difference.  Width is NEVER used
+    # to classify (that would bias the widths Step 5 measures).  Falls back to
+    # green brightness, then colour_score, if reflex_ratio is unavailable.
     valid = []
     for r in rows:
         try:
-            green = float(r.get('g_mean', 0) or 0)
-            if green <= 0:                       # fall back if g_mean absent
-                green = float(r['color_score'])
+            feat = float(r.get('reflex_ratio', 0) or 0)
+            if feat <= 0:
+                feat = float(r.get('g_mean', 0) or 0)
+            if feat <= 0:
+                feat = float(r['color_score'])
             width = float(r['width_px'])
-            if green <= 0 or width <= 0:
+            if feat <= 0 or width <= 0:
                 continue
-            valid.append((r, green, width))
+            valid.append((r, feat, width))
         except (ValueError, TypeError, KeyError):
             continue
 
@@ -93,7 +97,7 @@ def classify_image(filtered_csv, step1_out, out_dir, stem,
                 "n_arteriole": 0, "n_venule": 0, "n_uncertain": 0, "n_total": len(valid)}
 
     # Build arrays directly from the already-parsed values
-    av_feat = np.array([c for (_, c, _) in valid])   # green brightness
+    av_feat = np.array([c for (_, c, _) in valid])   # central light-reflex ratio
     widths  = np.array([w for (_, _, w) in valid])
 
     # Normalise per image (0-1 range)
@@ -103,7 +107,7 @@ def classify_image(filtered_csv, step1_out, out_dir, stem,
             return np.full_like(arr, 0.5)
         return (arr - mn) / (mx - mn)
 
-    norm_feat = norm(av_feat)   # high = brighter vessel = arteriole
+    norm_feat = norm(av_feat)   # high = strong central reflex = arteriole
 
     # Split on the MEDIAN so the A/V division is balanced, and measure
     # confidence as distance from that boundary.
