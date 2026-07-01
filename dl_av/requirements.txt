@@ -1,0 +1,7 @@
+# Extra deps for dl_av training/inference, on top of the root requirements.txt.
+# torch needs a CUDA build matching your GPU driver — install it separately, e.g.:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+numpy>=1.24
+opencv-python-headless>=4.8
+scikit-image>=0.22
+scipy>=1.11

@@ -164,9 +164,14 @@ which is why AVR is a *ratio* and pixel size cancels out.
 
 A separate, **local-only** experiment built to the same design as
 [AutoMorph](https://github.com/rmaphoh/AutoMorph): **deep learning for
-perception, classical maths for the number.**
+perception, classical maths for the number.** Trains on GPU (CUDA
+auto-detected, falls back to CPU) in two stages, since only some of the
+available benchmarks have artery/vein ground truth:
 
 ```
+Stage 1 (train_vessel.py): 8 vessel-only benchmarks ──► binary vessel encoder
+Stage 2 (train.py):        A/V-labelled images, init'd from stage 1 ──► A/V model
+
 Fundus image
    │
    ├─►  U-Net  ──►  per-pixel {background, artery, vein, crossing}   ← deep learning
@@ -180,11 +185,13 @@ Fundus image
 
 | File | Role |
 |------|------|
-| `unet.py` | Compact 4-class U-Net (background / artery / vein / crossing), 7.8M params |
+| `unet.py` | Compact U-Net (configurable classes/base); trained here with base=64 |
+| `datasets.py` | Pairs images↔masks across the 8-benchmark vessel-only collection |
 | `download_data.py` | Fetches the DRIVE_AV labelled training set |
-| `train.py` | Trains on DRIVE_AV + LES-AV; heavy augmentation; reports A/V accuracy |
+| `train_vessel.py` | Stage 1: pretrains a binary vessel encoder on all 8 vessel-only benchmarks |
+| `train.py` | Stage 2: fine-tunes the 4-class A/V model on DRIVE_AV + LES-AV + Fundus-AVSeg |
 | `infer.py` | Runs the model on an image/folder → overlay + CRAE/CRVE/AVR |
-| `av_unet.pth` | Trained weights |
+| `vessel_encoder.pth` / `av_unet.pth` | Stage 1 / stage 2 trained weights |
 
 **Why a U-Net and not an "AVR network"?** There is **no** neural network that
 outputs AVR directly — neither here nor in AutoMorph — because there is no
@@ -193,15 +200,33 @@ large-scale ground-truth AVR dataset to train one on. The network only does
 from that map by the same classical geometry as the web app.
 
 **Training data**
+
+A/V-labelled (stage 2, `train.py`):
 - **DRIVE_AV** — 20 train / 20 test, pixel-level A/V labels.
 - **LES-AV** — 22 images (colour-coded A/V labels, converted to indices).
-- Label scheme everywhere: `0=background, 1=artery, 2=vein, 3=crossing`.
+- **Fundus-AVSeg** — 100 images (85 train / 15 test), same colour-coded scheme.
 
-**Augmentation (`train.py`)** — beyond flips/rotations, training applies
-**photometric** augmentation (brightness/contrast, gamma, colour cast, blur,
-noise) and **synthetic lesions** (dark haemorrhage / bright exudate blobs), so
-the network stays accurate on diseased-looking images. Photometric transforms
-touch the image only, never the label, and run *before* normalisation.
+Vessel-only, no A/V labels (stage 1 pretraining, `train_vessel.py`):
+- **`retinal-vessel-fundus-dataset-collection/`** — DRIVE, STARE, CHASEDB1,
+  HRF, FIVES, RETA, TRENDS (+ LES-AV again) — 1042 image/mask pairs total.
+
+Label scheme everywhere: `0=background, 1=artery, 2=vein, 3=crossing`.
+
+**Augmentation (`train.py`, `train_vessel.py`)** — beyond flips/rotations,
+training applies **photometric** augmentation (brightness/contrast, gamma,
+colour cast, blur, noise) and (stage 2 only) **synthetic lesions** (dark
+haemorrhage / bright exudate blobs), so the network stays accurate on
+diseased-looking images. Photometric transforms touch the image only, never
+the label, and run *before* normalisation.
+
+**Measured performance** (GPU, base=64; see `dl_av/README.md` for the full
+per-class breakdown): A/V balanced accuracy on held-out test sets — DRIVE
+0.878, LES-AV 0.890, Fundus-AVSeg 0.907 (up from a CPU/base=32 proof-of-concept
+that scored DRIVE 0.736-0.787, LES-AV 0.851). Confusion-matrix analysis shows
+recall is high (0.87-0.91) but **precision is lower** (0.39-0.53) — the model
+over-predicts artery/vein onto background pixels — and the **crossing class is
+barely learned** (recall 0.05-0.21), a side effect of the class weights used
+to fight background dominance.
 
 **Run it on a single image:**
 ```bash
@@ -218,6 +243,10 @@ To check whether the DL pipeline is genuine, its AVR was compared image-by-image
 against the real, published **AutoMorph** tool (run on Colab; its
 `AVR_Knudtson_zone_b` column is the reference). See
 `dl_av/AUTOMORPH_COLAB.md` and the `automorph_results*.csv` files.
+
+> This comparison predates the GPU retrain in section 3 (it ran against the
+> CPU/base=32 model). It hasn't been re-run against the current `av_unet.pth`
+> — the findings below reflect the older, less accurate A/V model.
 
 **Findings:**
 - **Normal eyes:** both tools agree on the mean AVR (~0.67–0.75, both in the

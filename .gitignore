@@ -38,6 +38,8 @@ data/
 HRF/
 LES-AV/
 testx/
+retinal-vessel-fundus-dataset-collection/
+Fundus-AVSeg/
 
 # Jupyter
 .ipynb_checkpoints/

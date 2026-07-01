@@ -1,10 +1,10 @@
-"""Train the A/V U-Net on DRIVE_AV and report artery/vein accuracy on the
-held-out test split.  CPU-friendly proof-of-concept.
+"""Train the A/V U-Net on DRIVE_AV + LES-AV and report artery/vein accuracy on
+the held-out test split. Uses GPU automatically if available.
 
 Label encoding (verified): 0=background, 1=artery, 2=vein, 3=crossing.
 Run:  python dl_av/train.py
 """
-import os, glob, time
+import os, glob, time, argparse
 import numpy as np
 import cv2
 from PIL import Image
@@ -15,7 +15,10 @@ from unet import UNet
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DATA = os.path.join(HERE, "data", "DRIVE_AV")
-LES = os.path.join(ROOT, "LES-AV")
+# LES-AV lives inside the merged benchmark collection, not a standalone folder.
+LES = os.path.join(ROOT, "retinal-vessel-fundus-dataset-collection", "LES-AV")
+FUNDUS_AVSEG = os.path.join(ROOT, "Fundus-AVSeg")
+VESSEL_ENCODER = os.path.join(HERE, "vessel_encoder.pth")
 SIZE = 512                      # train/infer resolution
 # Class scheme everywhere: 0=background, 1=artery, 2=vein, 3=crossing/uncertain
 torch.manual_seed(0)
@@ -38,9 +41,10 @@ def _drive_label(lp):
     return np.array(Image.open(lp).resize((SIZE, SIZE), Image.NEAREST)).astype(np.int64)
 
 
-def _les_label(lp):
-    """LES-AV masks_multiclass are RGB: red=artery, blue=vein, green=cross,
-    white=uncertain. Convert to the 0/1/2/3 index scheme."""
+def _rgb_av_label(lp):
+    """Colour-coded A/V mask, RGB: red=artery, blue=vein, green=cross,
+    white=uncertain. Convert to the 0/1/2/3 index scheme. Shared by LES-AV's
+    masks_multiclass and Fundus-AVSeg's annotation/ — both use this scheme."""
     rgb = np.array(Image.open(lp).convert("RGB").resize((SIZE, SIZE), Image.NEAREST))
     r, g, b = rgb[:, :, 0], rgb[:, :, 1], rgb[:, :, 2]
     lab = np.zeros(rgb.shape[:2], np.int64)
@@ -83,8 +87,22 @@ def load_les():
         lp = os.path.join(LES, "masks_multiclass", stem + ".png")
         if os.path.exists(lp):
             pairs.append((ip, lp))
-    items = _load(pairs, _les_label)
+    items = _load(pairs, _rgb_av_label)
     return items[:-4], items[-4:]          # train, test
+
+
+def load_fundus_avseg():
+    """Fundus-AVSeg: 100 images, annotation/ uses the same colour-coded A/V
+    scheme as LES-AV (last 15 held out for test)."""
+    imgs = sorted(glob.glob(os.path.join(FUNDUS_AVSEG, "images", "*.png")))
+    pairs = []
+    for ip in imgs:
+        stem = os.path.splitext(os.path.basename(ip))[0]
+        lp = os.path.join(FUNDUS_AVSEG, "annotation", stem + ".png")
+        if os.path.exists(lp):
+            pairs.append((ip, lp))
+    items = _load(pairs, _rgb_av_label)
+    return items[:-15], items[-15:]        # train, test
 
 
 def augment_geometric(bgr, y):
@@ -154,24 +172,61 @@ def make_sample(bgr, y, train=True):
     return preprocess_img(bgr), y
 
 
+def load_pretrained_encoder(net, path):
+    """Copy every tensor that matches by name+shape from a train_vessel.py
+    checkpoint, skipping the final 1x1 `out` conv (2-class vessel vs 4-class
+    A/V -- shapes differ there by design)."""
+    if not path or not os.path.exists(path):
+        return 0
+    src = torch.load(path, map_location="cpu")
+    dst = net.state_dict()
+    xfer = {k: v for k, v in src.items()
+            if k in dst and dst[k].shape == v.shape and not k.startswith("out.")}
+    dst.update(xfer)
+    net.load_state_dict(dst)
+    return len(xfer)
+
+
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--epochs", type=int, default=60)
+    ap.add_argument("--batch-size", type=int, default=6)
+    ap.add_argument("--base", type=int, default=64)  # must match train_vessel.py's --base for the transfer to line up
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--init-vessel", default=VESSEL_ENCODER,
+                     help="path to a train_vessel.py checkpoint to initialise the encoder from, or '' to skip")
+    args = ap.parse_args()
+
     t0 = time.time()
     drive_train = load_drive("training")
     drive_test = load_drive("test")
     les_train, les_test = load_les()
-    train = drive_train + les_train
-    print(f"loaded train={len(train)} (DRIVE {len(drive_train)} + LES {len(les_train)})  "
-          f"test: DRIVE={len(drive_test)} LES={len(les_test)}  ({time.time()-t0:.0f}s)")
+    fundus_train, fundus_test = load_fundus_avseg()
+    train = drive_train + les_train + fundus_train
+    print(f"loaded train={len(train)} (DRIVE {len(drive_train)} + LES {len(les_train)} + "
+          f"Fundus-AVSeg {len(fundus_train)})  "
+          f"test: DRIVE={len(drive_test)} LES={len(les_test)} Fundus-AVSeg={len(fundus_test)}  "
+          f"({time.time()-t0:.0f}s)")
 
-    dev = torch.device("cpu")
-    net = UNet(3, 4, base=32).to(dev)
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"device: {dev}" + (f" ({torch.cuda.get_device_name(0)})" if dev.type == "cuda" else ""), flush=True)
+    out_path = os.path.join(HERE, "av_unet.pth")
+    net = UNet(3, 4, base=args.base).to(dev)
+    if os.path.exists(out_path):
+        net.load_state_dict(torch.load(out_path, map_location=dev))
+        print(f"resumed weights from {out_path}", flush=True)
+    else:
+        n_xfer = load_pretrained_encoder(net, args.init_vessel)
+        if n_xfer:
+            print(f"  init: transferred {n_xfer} tensors from {os.path.basename(args.init_vessel)}", flush=True)
     # Class weights: background dominates; up-weight vessels, esp. arteries.
-    w = torch.tensor([0.05, 2.5, 2.0, 1.0], dtype=torch.float32)
+    w = torch.tensor([0.05, 2.5, 2.0, 1.0], dtype=torch.float32).to(dev)
     crit = nn.CrossEntropyLoss(weight=w)
-    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    opt = torch.optim.Adam(net.parameters(), lr=args.lr)
     sched = torch.optim.lr_scheduler.StepLR(opt, step_size=25, gamma=0.5)
+    scaler = torch.amp.GradScaler(dev.type, enabled=(dev.type == "cuda"))
 
-    EPOCHS, BATCH = 60, 2
+    EPOCHS, BATCH = args.epochs, args.batch_size
     for ep in range(1, EPOCHS + 1):
         net.train()
         order = np.random.permutation(len(train))
@@ -182,35 +237,80 @@ def main():
             x = torch.from_numpy(np.stack(xs)).to(dev)
             y = torch.from_numpy(np.stack(ys)).to(dev)
             opt.zero_grad()
-            loss = crit(net(x), y)
-            loss.backward()
-            opt.step()
+            with torch.amp.autocast(dev.type, enabled=(dev.type == "cuda")):
+                loss = crit(net(x), y)
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
             ep_loss += float(loss) * len(idx)
         sched.step()
         if ep % 5 == 0 or ep == 1:
             bd = evaluate(net, drive_test, dev)
             bl = evaluate(net, les_test, dev)
+            bf = evaluate(net, fundus_test, dev)
             print(f"epoch {ep:3d}  loss={ep_loss/len(train):.4f}  "
-                  f"A/V bal-acc: DRIVE={bd:.3f} LES={bl:.3f}  ({time.time()-t0:.0f}s)")
+                  f"A/V bal-acc: DRIVE={bd:.3f} LES={bl:.3f} Fundus-AVSeg={bf:.3f}  "
+                  f"({time.time()-t0:.0f}s)", flush=True)
+        if ep % 10 == 0 or ep == EPOCHS:
+            # Checkpoint periodically -- a long run can get torn down by the
+            # host session before it reaches the final save.
+            torch.save(net.state_dict(), out_path)
+            print(f"  checkpoint saved ({ep}/{EPOCHS})", flush=True)
 
-    torch.save(net.state_dict(), os.path.join(HERE, "av_unet.pth"))
-    print("saved", os.path.join(HERE, "av_unet.pth"))
+    print("done ->", out_path)
+    for name, test in [("DRIVE", drive_test), ("LES-AV", les_test), ("Fundus-AVSeg", fundus_test)]:
+        print_full_report(name, net, test, dev)
+
+
+CLASSES = ["background", "artery", "vein", "crossing"]
 
 
 @torch.no_grad()
-def evaluate(net, test, dev):
-    """Balanced A/V accuracy on true vessel pixels (artery vs vein only)."""
+def evaluate(net, test, dev, full=False):
+    """Balanced A/V accuracy on true vessel pixels (artery vs vein only).
+    With full=True, also returns the 4x4 confusion matrix (rows=true,
+    cols=pred) and per-class precision/recall/F1."""
     net.eval()
-    tp_a = tot_a = tp_v = tot_v = 0
+    cm = np.zeros((4, 4), dtype=np.int64)
     for bgr, y in test:
         x, _ = make_sample(bgr, y, train=False)      # no augmentation at eval
         pred = net(torch.from_numpy(x[None]).to(dev)).argmax(1)[0].cpu().numpy()
-        a = (y == 1); v = (y == 2)
-        tp_a += int(((pred == 1) & a).sum()); tot_a += int(a.sum())
-        tp_v += int(((pred == 2) & v).sum()); tot_v += int(v.sum())
+        for t in range(4):
+            ymask = y == t
+            if not ymask.any():
+                continue
+            for p in range(4):
+                cm[t, p] += int((ymask & (pred == p)).sum())
+    tp_a, tot_a = cm[1, 1], cm[1].sum()
+    tp_v, tot_v = cm[2, 2], cm[2].sum()
     se = tp_a / (tot_a + 1e-9)         # artery recall
     sp = tp_v / (tot_v + 1e-9)         # vein recall
-    return (se + sp) / 2
+    bal_acc = (se + sp) / 2
+    if not full:
+        return bal_acc
+
+    report = {}
+    for c, name in enumerate(CLASSES):
+        tp = cm[c, c]
+        fp = cm[:, c].sum() - tp
+        fn = cm[c, :].sum() - tp
+        prec = tp / (tp + fp + 1e-9)
+        rec = tp / (tp + fn + 1e-9)
+        f1 = 2 * prec * rec / (prec + rec + 1e-9)
+        report[name] = (prec, rec, f1)
+    return bal_acc, cm, report
+
+
+def print_full_report(name, net, test, dev):
+    bal_acc, cm, report = evaluate(net, test, dev, full=True)
+    print(f"\n{name}  (n={len(test)}, balanced A/V accuracy={bal_acc:.3f})")
+    print("  confusion matrix (rows=true, cols=pred):")
+    print("           " + "  ".join(f"{c[:8]:>8}" for c in CLASSES))
+    for i, c in enumerate(CLASSES):
+        print(f"  {c[:8]:>8} " + "  ".join(f"{cm[i, j]:>8d}" for j in range(4)))
+    print("  per-class precision / recall / F1:")
+    for c, (prec, rec, f1) in report.items():
+        print(f"    {c:<10} {prec:.3f}  {rec:.3f}  {f1:.3f}")
 
 
 if __name__ == "__main__":

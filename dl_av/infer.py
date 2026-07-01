@@ -31,7 +31,7 @@ _MODEL = None
 def _model():
     global _MODEL
     if _MODEL is None:
-        net = UNet(3, 4, base=32)
+        net = UNet(3, 4, base=64)  # must match train.py's --base
         net.load_state_dict(torch.load(os.path.join(HERE, "av_unet.pth"),
                                        map_location="cpu"))
         net.eval()
