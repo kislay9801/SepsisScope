@@ -34,6 +34,10 @@ sample/
 
 # Data (large image datasets — commit only if small/versioned)
 data/
+# Named training/test image datasets (not digit-prefixed, so listed explicitly)
+HRF/
+LES-AV/
+testx/
 
 # Jupyter
 .ipynb_checkpoints/
